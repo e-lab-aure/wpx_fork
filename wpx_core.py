@@ -1,18 +1,64 @@
 from browserforge.fingerprints import Screen
 from camoufox import Camoufox
 from curl_cffi import requests
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 import importlib.metadata
 import time
 import traceback
 from wpx_output import print_status, print_warn
 
+# Défaut généreux : "networkidle" attendait que le réseau soit silencieux, ce qui n'arrive
+# jamais sur un site avec des scripts d'analytics/chat en polling continu — d'où les
+# TimeoutError observées même sur des pages qui avaient déjà fini de charger.
+# "domcontentloaded" ne dépend plus de ce silence réseau ; le timeout reste généreux car un
+# défi WAF/JS peut prendre plusieurs secondes avant de rediriger.
+DEFAULT_NAV_TIMEOUT_MS = 60000
+
 
 class WPXCore:
-    def __init__(self, target_url):
+    def __init__(self, target_url, nav_timeout_ms=DEFAULT_NAV_TIMEOUT_MS):
         self.target_url = target_url
         self.cookies = {}
         self.user_agent = ""
         self.session = None
+        self.nav_timeout_ms = nav_timeout_ms
+
+    def _page_seems_usable(self, page):
+        """Après un timeout de navigation, la page est-elle malgré tout exploitable ?
+
+        `bypass_waf()` n'a besoin que des cookies et de l'UA — pas d'un rendu complet. Une
+        page de défi WAF/JS a souvent déjà servi assez de DOM (title, scripts du challenge)
+        pour ça, même si `domcontentloaded` n'a jamais officiellement été signalé côté
+        Playwright. On vérifie plusieurs indices plutôt que de se fier à un seul, aucun n'est
+        déterminant seul :
+        - URL courante : navigation au moins entamée (pas restée sur about:blank) ;
+        - readyState du DOM : "interactive"/"complete" signale un DOM utilisable ;
+        - taille du contenu : une page de défi vide indique généralement un blocage réel.
+        """
+        try:
+            url = page.url
+        except Exception:
+            url = ""
+        if not url or url == "about:blank":
+            print_status("  Page toujours sur about:blank — navigation jamais entamée.")
+            return False
+
+        try:
+            ready_state = page.evaluate("document.readyState")
+        except Exception:
+            ready_state = None
+
+        try:
+            content = page.content()
+        except Exception:
+            content = ""
+        content_len = len(content)
+
+        print_status(f"  URL courante        : {url}")
+        print_status(f"  document.readyState : {ready_state}")
+        print_status(f"  Taille du contenu    : {content_len} octets")
+
+        return content_len > 200 or ready_state in ("interactive", "complete")
 
     def bypass_waf(self):
         print_status(f"Launching Camoufox to bypass WAF for {self.target_url}...")
@@ -24,8 +70,21 @@ class WPXCore:
             with Camoufox(headless=True, screen=screen) as browser:
                 page = browser.new_page()
 
-                # Navigate and solve challenge
-                page.goto(self.target_url, wait_until="networkidle")
+                # Navigate and solve challenge. "domcontentloaded" plutôt que "networkidle" :
+                # ce dernier attend un silence réseau qui n'arrive jamais sur beaucoup de
+                # sites (widgets de chat, analytics en polling), causant des TimeoutError
+                # même quand la page a déjà fini de charger pour de vrai.
+                try:
+                    page.goto(self.target_url, wait_until="domcontentloaded",
+                             timeout=self.nav_timeout_ms)
+                except PlaywrightTimeoutError:
+                    print_warn(f"Navigation timed out after {self.nav_timeout_ms}ms — "
+                              "checking whether the page is usable anyway...")
+                    if not self._page_seems_usable(page):
+                        print_warn("Page does not appear usable after the timeout — "
+                                  "aborting WAF bypass.")
+                        return False
+                    print_status("Page appears usable despite the timeout — continuing.")
 
                 # Allow extra time for WAF JS challenge redirect to complete
                 time.sleep(5)
