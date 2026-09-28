@@ -2,7 +2,10 @@ import json
 
 import pytest
 
-from wpx_artifact import new_scan_dir, save_scan_artifact, load_inventory, load_scan_meta
+from wpx_artifact import (
+    new_scan_dir, save_scan_artifact, load_inventory, load_scan_meta,
+    save_vulnerability_report, load_vulnerability_report,
+)
 
 
 # ------------------------------------------------------------------
@@ -192,3 +195,29 @@ def test_save_scan_artifact_is_valid_json(tmp_path):
         assert json.load(f) == inventory
     with open(scan_path) as f:
         json.load(f)  # must not raise
+
+
+def test_load_vulnerability_report_returns_none_when_absent(tmp_path):
+    assert load_vulnerability_report(tmp_path) is None
+
+
+def test_save_and_load_vulnerability_report_roundtrip(tmp_path):
+    report = {"status": "ok", "queried_at": "2026-01-01T00:00:00+00:00",
+              "plugins": {"elementor": {"vulns": []}}}
+    path = save_vulnerability_report(tmp_path, report)
+    assert path.exists()
+    assert load_vulnerability_report(tmp_path) == report
+
+
+def test_save_vulnerability_report_is_replayable_overwrites(tmp_path):
+    save_vulnerability_report(tmp_path, {"status": "ok", "plugins": {}})
+    save_vulnerability_report(tmp_path, {"status": "ok", "plugins": {"x": None}})
+    assert load_vulnerability_report(tmp_path) == {"status": "ok", "plugins": {"x": None}}
+
+
+def test_saving_vulnerability_report_does_not_touch_inventory(tmp_path):
+    inventory = {"target": "https://example.com", "plugins": []}
+    save_scan_artifact(tmp_path, "https://example.com", inventory)
+    save_vulnerability_report(tmp_path, {"status": "failed", "error": "quota exceeded", "plugins": {}})
+    # The collection artifact must be untouched by an enrichment run, successful or not.
+    assert load_inventory(tmp_path) == inventory

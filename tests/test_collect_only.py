@@ -111,3 +111,54 @@ def test_collect_only_saves_artifact_with_collect_only_flag_in_meta(mocker):
     assert save_spy.call_count == 1
     _, kwargs = save_spy.call_args
     assert kwargs["meta"]["collect_only"] is True
+
+
+# ------------------------------------------------------------------
+# `wpx.py enrich <scan-dir>` — offline enrichment subcommand
+# ------------------------------------------------------------------
+
+def test_run_enrich_loads_inventory_and_saves_report(mocker, tmp_path):
+    inventory = {"target": "https://example.com", "plugins": []}
+    mocker.patch("wpx.load_inventory", return_value=inventory)
+    enrich_spy = mocker.patch.object(
+        wpx.WPScanEnricher, "enrich_inventory",
+        return_value={"status": "ok", "plugins": {}},
+    )
+    save_spy = mocker.patch("wpx.save_vulnerability_report", return_value=tmp_path / "vulnerability.json")
+
+    wpx._run_enrich([str(tmp_path), "--api-key", "fake-key", "-q"])
+
+    enrich_spy.assert_called_once_with(inventory)
+    save_spy.assert_called_once()
+
+
+def test_run_enrich_never_touches_the_target(mocker, tmp_path):
+    # No WPXCore/WPXFinder/network-to-target machinery is even imported into
+    # the enrich path — it only loads inventory.json and calls the enricher.
+    inventory = {"target": "https://example.com", "plugins": []}
+    mocker.patch("wpx.load_inventory", return_value=inventory)
+    core_spy = mocker.patch("wpx.WPXCore")
+    mocker.patch.object(wpx.WPScanEnricher, "enrich_inventory", return_value={"status": "ok", "plugins": {}})
+    mocker.patch("wpx.save_vulnerability_report", return_value=tmp_path / "vulnerability.json")
+
+    wpx._run_enrich([str(tmp_path), "--api-key", "fake-key", "-q"])
+
+    core_spy.assert_not_called()
+
+
+def test_run_enrich_requires_api_key():
+    with pytest.raises(SystemExit):
+        wpx._run_enrich(["some/scan/dir"])
+
+
+def test_run_enrich_exits_nonzero_on_failed_status(mocker, tmp_path):
+    mocker.patch("wpx.load_inventory", return_value={"target": "x", "plugins": []})
+    mocker.patch.object(
+        wpx.WPScanEnricher, "enrich_inventory",
+        return_value={"status": "failed", "error": "boom", "plugins": {}},
+    )
+    mocker.patch("wpx.save_vulnerability_report", return_value=tmp_path / "vulnerability.json")
+
+    with pytest.raises(SystemExit) as exc_info:
+        wpx._run_enrich([str(tmp_path), "--api-key", "fake-key", "-q"])
+    assert exc_info.value.code == 1
