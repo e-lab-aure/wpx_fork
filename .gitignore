@@ -1,4 +1,5 @@
 .wpx_data/
+scans/
 *.md
 !README.md
 **/__pycache__/

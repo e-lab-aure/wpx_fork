@@ -9,6 +9,7 @@ from wpx_data import WPXData
 from wpx_core import WPXCore, DEFAULT_NAV_TIMEOUT_MS
 from wpx_finder import WPXFinder, ScanIdleTimeout
 from wpx_vulnerability import WPXVulnerability
+from wpx_artifact import new_scan_dir, save_scan_artifact
 from packaging.version import Version, InvalidVersion
 from wpx_output import (
     init_output,
@@ -73,6 +74,8 @@ def _show_help():
     print(f"  {BOLD}Output:{RESET}")
     print(f"    {GREEN}-q, --quiet{RESET}             Findings only — suppress banner, status, progress")
     print(f"    {GREEN}-o, --output FILE{RESET}       Save plain-text output to FILE")
+    print(f"    {GREEN}--scan-dir DIR{RESET}          Save the collection artifact to DIR (default: scans/<id>/)")
+    print(f"    {GREEN}--no-artifact{RESET}           Skip writing the collection artifact")
     print()
     print(f"  {BOLD}Misc:{RESET}")
     print(f"    {GREEN}--update{RESET}                Force refresh of WPScan metadata files")
@@ -120,6 +123,11 @@ def main():
                              f"{DEFAULT_NAV_TIMEOUT_MS}).")
     parser.add_argument("--quiet", "-q", action="store_true")
     parser.add_argument("--output", "-o", metavar="FILE")
+    parser.add_argument("--scan-dir", metavar="DIR",
+                        help="Save the collection artifact (scan.json + inventory.json) to DIR "
+                             "instead of an auto-generated scans/<timestamp>-<host>/ directory.")
+    parser.add_argument("--no-artifact", action="store_true",
+                        help="Skip writing the collection artifact.")
     parser.add_argument("--help", "-h", action="store_true")
 
     args = parser.parse_args()
@@ -304,6 +312,17 @@ def _run(args):
         print_plain()
         print_warn(f"Scan aborted: {e}")
         print_warn("Showing partial results...")
+
+    # 4. Save collection artifact — strictly before any WPScan call, so the
+    #    collection stays re-enrichable/re-reportable offline afterwards.
+    if not args.no_artifact:
+        inventory = finder.to_inventory()
+        scan_dir = Path(args.scan_dir) if args.scan_dir else new_scan_dir(target_url)
+        scan_path, inventory_path = save_scan_artifact(
+            scan_dir, target_url, inventory,
+            meta={"enumerate": sorted(tokens), "threads": args.threads},
+        )
+        print_status(f"Collection artifact saved: {scan_path.parent}/")
 
     # 5. Vulnerability API
     vuln_api = WPXVulnerability(api_key=args.api_key)

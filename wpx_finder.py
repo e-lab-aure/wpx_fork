@@ -852,6 +852,102 @@ class WPXFinder:
         if not found_any:
             self.user_enum_blocked.append(tech["name"])
 
+    # ------------------------------------------------------------------
+    # Normalized inventory (collection artifact)
+    # ------------------------------------------------------------------
+
+    def to_inventory(self):
+        """Serialize the accumulated scan state into a normalized inventory.
+
+        Pure read of already-collected instance state — makes no network
+        request. Values are only ever what detection actually produced:
+        an unknown version stays "Unknown"/None, never guessed.
+        """
+        return {
+            "target": self.core.target_url,
+            "wordpress": self._wp_version_to_inventory(),
+            "theme": self._theme_to_inventory(),
+            "plugins": self._plugins_to_inventory(),
+            "users": {
+                "found": list(self.found_users),
+                "ran": self.user_enum_ran,
+                "blocked_techniques": list(self.user_enum_blocked),
+            },
+            "multisite": self.multisite,
+            "core_files": self.core_files,
+            "headers": self.headers_result,
+            "config_backups": [
+                {"url": url, "confidence": 100, "found_by": "Config Backup (Aggressive Detection)"}
+                for url in self.config_backups
+            ],
+        }
+
+    def _wp_version_to_inventory(self):
+        if not self.wp_version:
+            return None
+        wv = self.wp_version
+        evidence = [{
+            "found_by": wv["found_by"],
+            "url": wv["found_url"],
+            "match": wv["found_match"],
+        }]
+        confidence = 80
+        if wv.get("confirmed_by"):
+            confidence = 100
+            evidence.append({
+                "found_by": wv["confirmed_by"]["method"],
+                "url": wv["confirmed_by"]["url"],
+                "match": wv["confirmed_by"].get("match"),
+            })
+        return {
+            "version": wv["version"],
+            "confidence": confidence,
+            "evidence": evidence,
+            "is_latest": wv.get("is_latest"),
+            "latest_version": wv.get("latest_version"),
+            "release_date": wv.get("release_date"),
+        }
+
+    def _theme_to_inventory(self):
+        if not self.theme or not isinstance(self.theme, dict):
+            return None
+        th = self.theme
+        evidence = [{"found_by": th["found_by"], "url": th.get("location")}]
+        if th.get("confirmed_by"):
+            evidence.append({"found_by": th["confirmed_by"]})
+        version = th.get("version")
+        return {
+            "slug": th["slug"],
+            "name": th.get("name"),
+            "author": th.get("author"),
+            "description": th.get("description"),
+            "location": th.get("location"),
+            "style_url": th.get("style_url"),
+            "readme_url": th.get("readme_url"),
+            "version": version if version else None,
+            "version_confidence": th.get("version_confidence") or 0,
+            "evidence": evidence,
+        }
+
+    def _plugins_to_inventory(self):
+        plugins = []
+        for slug, p in self.found_plugins.items():
+            evidence = [{"found_by": p["found_by"], "url": p.get("location")}]
+            if p.get("confirmed_by"):
+                evidence.append({"found_by": p["confirmed_by"]})
+            if p.get("version_found_by"):
+                evidence.append({"found_by": p["version_found_by"], "url": p.get("version_url")})
+            version = p.get("version")
+            plugins.append({
+                "slug": slug,
+                "status": p.get("status"),
+                "location": p.get("location"),
+                "version": version if version and version != "Unknown" else None,
+                "version_confidence": p.get("version_confidence") or 0,
+                "evidence": evidence,
+            })
+        return plugins
+
 
 if __name__ == "__main__":
     from wpx_data import WPXData
