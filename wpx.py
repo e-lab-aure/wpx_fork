@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from wpx_data import WPXData
-from wpx_core import WPXCore
+from wpx_core import WPXCore, DEFAULT_NAV_TIMEOUT_MS
 from wpx_finder import WPXFinder, ScanIdleTimeout
 from wpx_vulnerability import WPXVulnerability
 from packaging.version import Version, InvalidVersion
@@ -68,6 +68,7 @@ def _show_help():
     print(f"    {GREEN}--full-scan{RESET}             Scan all available plugin slugs (50k+)")
     print(f"    {GREEN}--users-limit N{RESET}         Author IDs to probe via ?author=N (default: 10)")
     print(f"    {GREEN}--no-browser{RESET}            Skip WAF bypass, connect directly")
+    print(f"    {GREEN}--nav-timeout MS{RESET}        Camoufox page navigation timeout (default: {DEFAULT_NAV_TIMEOUT_MS})")
     print()
     print(f"  {BOLD}Output:{RESET}")
     print(f"    {GREEN}-q, --quiet{RESET}             Findings only — suppress banner, status, progress")
@@ -114,6 +115,9 @@ def main():
                         help="Add random delays (default 1.5 = 1–3s, --stealth 5 = 1–10s).")
     parser.add_argument("--idle-timeout", type=int, default=60, metavar='N',
                         help="Abort if no server response for N seconds (default: 60, 0 = off).")
+    parser.add_argument("--nav-timeout", type=int, default=DEFAULT_NAV_TIMEOUT_MS, metavar='MS',
+                        help="Camoufox page navigation timeout in ms (default: "
+                             f"{DEFAULT_NAV_TIMEOUT_MS}).")
     parser.add_argument("--quiet", "-q", action="store_true")
     parser.add_argument("--output", "-o", metavar="FILE")
     parser.add_argument("--help", "-h", action="store_true")
@@ -198,7 +202,7 @@ def _run(args):
     data.load_user_enum_techniques()
 
     # 2. WAF Bypass
-    core = WPXCore(target_url)
+    core = WPXCore(target_url, nav_timeout_ms=args.nav_timeout)
     if args.no_browser:
         print_warn("--no-browser: skipping WAF bypass, using direct session.")
     else:

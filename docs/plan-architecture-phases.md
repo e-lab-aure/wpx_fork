@@ -109,7 +109,7 @@ wpx scan TARGET  =  collect + validate + save + enrich + report à la suite
 ## Étapes (chacune vérifiée avant de passer à la suivante — pas de refactor massif en un bloc)
 
 - [x] **Étape 1 — Analyse** (faite, ci-dessus).
-- [ ] **Étape 2 — Corriger `networkidle`** (`wpx_core.py::bypass_waf`)
+- [x] **Étape 2 — Corriger `networkidle`** (`wpx_core.py::bypass_waf`) — faite.
   - `wait_until="domcontentloaded"`, timeout configurable (défaut 60000ms).
   - Ne pas juste avaler l'exception `PlaywrightTimeoutError` : sur timeout, vérifier si la page
     est malgré tout exploitable (URL courante, contenu, indicateurs WAF/challenge, DOM
