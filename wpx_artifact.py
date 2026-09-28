@@ -14,6 +14,7 @@ from pathlib import Path
 
 SCAN_JSON = "scan.json"
 INVENTORY_JSON = "inventory.json"
+VULNERABILITY_JSON = "vulnerability.json"
 
 
 def _slugify_host(target_url):
@@ -57,3 +58,20 @@ def load_inventory(scan_dir):
 def load_scan_meta(scan_dir):
     scan_dir = Path(scan_dir)
     return json.loads((scan_dir / SCAN_JSON).read_text(encoding="utf-8"))
+
+
+def save_vulnerability_report(scan_dir, vulnerability_report):
+    """Persist vulnerability.json (WPScan enrichment result). Replayable: overwrites on rerun."""
+    scan_dir = Path(scan_dir)
+    scan_dir.mkdir(parents=True, exist_ok=True)
+    path = scan_dir / VULNERABILITY_JSON
+    path.write_text(json.dumps(vulnerability_report, indent=2, sort_keys=True), encoding="utf-8")
+    return path
+
+
+def load_vulnerability_report(scan_dir):
+    """Load vulnerability.json, or None if enrichment has not run yet for this scan."""
+    path = Path(scan_dir) / VULNERABILITY_JSON
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))

@@ -125,7 +125,7 @@ wpx scan TARGET  =  collect + validate + save + enrich + report à la suite
   - Retirer l'appel `WPXVulnerability` de `_run()` / de la phase de collecte.
   - `--collect-only` (ou option équivalente) : ne construit jamais `WPXVulnerability`, ne
     consomme aucune requête WPScan, fonctionne sans clé / hors ligne / API indisponible.
-- [ ] **Étape 5 — `wpx enrich <scan-dir>`**
+- [x] **Étape 5 — `wpx enrich <scan-dir>`** — faite.
   - Charge uniquement `inventory.json`, **aucun accès à la cible**.
   - `WPScanEnricher` (`integrations/wpscan.py` ou emplacement cohérent) : reçoit un inventaire
     déjà établi, ne découvre rien lui-même, écrit `vulnerability.json`.

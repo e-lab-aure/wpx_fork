@@ -9,7 +9,10 @@ from wpx_data import WPXData
 from wpx_core import WPXCore, DEFAULT_NAV_TIMEOUT_MS
 from wpx_finder import WPXFinder, ScanIdleTimeout
 from wpx_vulnerability import WPXVulnerability
-from wpx_artifact import new_scan_dir, save_scan_artifact
+from wpx_artifact import (
+    new_scan_dir, save_scan_artifact, load_inventory, save_vulnerability_report,
+)
+from wpx_enricher import WPScanEnricher
 from packaging.version import Version, InvalidVersion
 from wpx_output import (
     init_output,
@@ -82,12 +85,19 @@ def _show_help():
     print(f"    {GREEN}--update{RESET}                Force refresh of WPScan metadata files")
     print(f"    {GREEN}-h, --help{RESET}              Show this help")
     print()
+    print(f"  {BOLD}Commands:{RESET}")
+    print(f"    {GREEN}enrich SCAN_DIR --api-key KEY{RESET}")
+    print("        Offline WPScan enrichment of a prior --collect-only scan. Reads only")
+    print("        SCAN_DIR/inventory.json, never contacts the target. Writes vulnerability.json.")
+    print()
     print(f"  {BOLD}Examples:{RESET}")
     print("    python3 wpx.py -u https://example.com")
     print("    python3 wpx.py -u https://example.com -e u")
     print("    python3 wpx.py -u https://example.com -e p,u --plugins-limit 500")
     print("    python3 wpx.py -u https://example.com -e p,cb --api-key KEY --quiet")
     print("    python3 wpx.py -u https://example.com -e p --full-scan --threads 50")
+    print("    python3 wpx.py -u https://example.com --collect-only")
+    print("    python3 wpx.py enrich scans/20260101T000000Z-example.com --api-key KEY")
     print()
 
 
@@ -103,6 +113,10 @@ def main():
         init_output()
         _show_help()
         sys.exit(0)
+
+    if sys.argv[1] == "enrich":
+        _run_enrich(sys.argv[2:])
+        return
 
     parser = _Parser(add_help=False)
     parser.add_argument("--url", "-u")
@@ -172,6 +186,41 @@ def _parse_enumerate(value):
         )
         sys.exit(2)
     return raw
+
+
+def _run_enrich(argv):
+    """`wpx.py enrich <scan-dir>` — offline WPScan enrichment of an existing scan.
+
+    Loads only inventory.json from scan_dir and never contacts the target: every
+    request this makes goes to the WPScan API, keyed on slugs already present in
+    the saved inventory. Replayable — running it again just overwrites
+    vulnerability.json with a fresh result, the collection artifact is never
+    touched.
+    """
+    parser = argparse.ArgumentParser(prog="wpx.py enrich", add_help=True)
+    parser.add_argument("scan_dir", help="Path to a scan directory produced by a prior collection "
+                                          "(must contain inventory.json).")
+    parser.add_argument("--api-key", required=True, help="WPScan Vulnerability Database API key.")
+    parser.add_argument("--quiet", "-q", action="store_true")
+    args = parser.parse_args(argv)
+
+    init_output(quiet=args.quiet)
+    print_status(f"Enriching {args.scan_dir} from WPScan (offline w.r.t. the target)...")
+
+    inventory = load_inventory(args.scan_dir)
+    enricher = WPScanEnricher(api_key=args.api_key)
+    report = enricher.enrich_inventory(inventory)
+    path = save_vulnerability_report(args.scan_dir, report)
+
+    if report["status"] == "failed":
+        print_warn(f"Enrichment failed: {report.get('error')}")
+        print_warn(f"Result saved to {path} — the scan artifact was not modified, retry later.")
+        sys.exit(1)
+
+    queried = len(report["plugins"])
+    errors = sum(1 for v in report["plugins"].values() if isinstance(v, dict) and v.get("status") == "error")
+    print_status(f"Queried {queried} plugin slug(s), {errors} error(s).")
+    print_status(f"Saved: {path}")
 
 
 def _run(args):
