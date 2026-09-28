@@ -915,6 +915,8 @@ class WPXFinder:
         evidence = [{"found_by": th["found_by"], "url": th.get("location")}]
         if th.get("confirmed_by"):
             evidence.append({"found_by": th["confirmed_by"]})
+        if th.get("version_found_by"):
+            evidence.append({"found_by": th["version_found_by"], "url": th.get("style_url")})
         version = th.get("version")
         return {
             "slug": th["slug"],

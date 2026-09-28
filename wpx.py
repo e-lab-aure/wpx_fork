@@ -8,29 +8,17 @@ from pathlib import Path
 from wpx_data import WPXData
 from wpx_core import WPXCore, DEFAULT_NAV_TIMEOUT_MS
 from wpx_finder import WPXFinder, ScanIdleTimeout
-from wpx_vulnerability import WPXVulnerability
 from wpx_artifact import (
-    new_scan_dir, save_scan_artifact, load_inventory, save_vulnerability_report,
+    new_scan_dir, save_scan_artifact, load_inventory, load_scan_meta,
+    save_vulnerability_report, load_vulnerability_report,
 )
 from wpx_enricher import WPScanEnricher
-from packaging.version import Version, InvalidVersion
+from wpx_report import print_report, _is_version_affected
 from wpx_output import (
     init_output,
     print_banner, print_finding, print_info, print_warn, print_status, print_plain,
     GREEN, YELLOW, RED, RESET, BOLD,
 )
-
-
-def _is_version_affected(detected: str, fixed_in) -> bool:
-    """Return True if the detected version is still affected by this vulnerability."""
-    if not fixed_in or fixed_in == "N/A":
-        return True  # unknown fix point — assume affected
-    if not detected or detected == "Unknown":
-        return True  # unknown installed version — assume affected
-    try:
-        return Version(detected) < Version(str(fixed_in))
-    except InvalidVersion:
-        return True  # unparseable version — assume affected
 
 
 def _ver_status(plugin_info, api_result):
@@ -89,6 +77,9 @@ def _show_help():
     print(f"    {GREEN}enrich SCAN_DIR --api-key KEY{RESET}")
     print("        Offline WPScan enrichment of a prior --collect-only scan. Reads only")
     print("        SCAN_DIR/inventory.json, never contacts the target. Writes vulnerability.json.")
+    print(f"    {GREEN}report SCAN_DIR{RESET}")
+    print("        Print a report from a saved scan (with enrichment if vulnerability.json")
+    print("        exists, without it otherwise). No network access at all.")
     print()
     print(f"  {BOLD}Examples:{RESET}")
     print("    python3 wpx.py -u https://example.com")
@@ -98,6 +89,7 @@ def _show_help():
     print("    python3 wpx.py -u https://example.com -e p --full-scan --threads 50")
     print("    python3 wpx.py -u https://example.com --collect-only")
     print("    python3 wpx.py enrich scans/20260101T000000Z-example.com --api-key KEY")
+    print("    python3 wpx.py report scans/20260101T000000Z-example.com")
     print()
 
 
@@ -116,6 +108,10 @@ def main():
 
     if sys.argv[1] == "enrich":
         _run_enrich(sys.argv[2:])
+        return
+
+    if sys.argv[1] == "report":
+        _run_report(sys.argv[2:])
         return
 
     parser = _Parser(add_help=False)
@@ -221,6 +217,28 @@ def _run_enrich(argv):
     errors = sum(1 for v in report["plugins"].values() if isinstance(v, dict) and v.get("status") == "error")
     print_status(f"Queried {queried} plugin slug(s), {errors} error(s).")
     print_status(f"Saved: {path}")
+
+
+def _run_report(argv):
+    """`wpx.py report <scan-dir>` — print a report from a saved scan, with or without enrichment.
+
+    Reads scan.json + inventory.json (required) and vulnerability.json (optional —
+    the report degrades gracefully if `enrich` was never run, or failed). Makes no
+    network request at all, to the target or to WPScan.
+    """
+    parser = argparse.ArgumentParser(prog="wpx.py report", add_help=True)
+    parser.add_argument("scan_dir", help="Path to a scan directory produced by a prior collection "
+                                          "(must contain scan.json + inventory.json).")
+    parser.add_argument("--quiet", "-q", action="store_true")
+    args = parser.parse_args(argv)
+
+    init_output(quiet=args.quiet)
+
+    scan_meta = load_scan_meta(args.scan_dir)
+    inventory = load_inventory(args.scan_dir)
+    vulnerability_report = load_vulnerability_report(args.scan_dir)
+
+    print_report(scan_meta["target"], inventory, vulnerability_report, meta=scan_meta)
 
 
 def _run(args):
@@ -368,325 +386,39 @@ def _run(args):
 
     # 4. Save collection artifact — strictly before any WPScan call, so the
     #    collection stays re-enrichable/re-reportable offline afterwards.
+    inventory = finder.to_inventory()
+    scan_meta = {
+        "enumerate": sorted(tokens),
+        "threads": args.threads,
+        "collect_only": args.collect_only,
+    }
     if not args.no_artifact:
-        inventory = finder.to_inventory()
         scan_dir = Path(args.scan_dir) if args.scan_dir else new_scan_dir(target_url)
-        scan_path, inventory_path = save_scan_artifact(
-            scan_dir, target_url, inventory,
-            meta={
-                "enumerate": sorted(tokens),
-                "threads": args.threads,
-                "collect_only": args.collect_only,
-            },
-        )
+        scan_path, inventory_path = save_scan_artifact(scan_dir, target_url, inventory, meta=scan_meta)
         print_status(f"Collection artifact saved: {scan_path.parent}/")
 
-    # 5. Vulnerability API — never reached in --collect-only: WPXVulnerability is not even
-    #    constructed, so no WPScan request can happen regardless of --api-key.
-    api_results = {}
+    # 5. Vulnerability enrichment — never reached in --collect-only: WPScanEnricher is not
+    #    even constructed, so no WPScan request can happen regardless of --api-key.
+    vulnerability_report = None
     if args.collect_only:
         if args.api_key:
             print_warn("--collect-only: ignoring --api-key, no WPScan request will be made.")
         else:
             print_status("Collect-only mode: skipping WPScan enrichment.")
     elif args.api_key:
-        vuln_api = WPXVulnerability(api_key=args.api_key)
-        for slug in finder.found_plugins:
-            api_results[slug] = vuln_api.get_vulnerabilities("plugins", slug)
+        enricher = WPScanEnricher(api_key=args.api_key)
+        vulnerability_report = enricher.enrich_inventory(inventory)
+        if not args.no_artifact:
+            save_vulnerability_report(scan_dir, vulnerability_report)
 
     # ------------------------------------------------------------------
-    # 5. Rich output
-    # ------------------------------------------------------------------
-    print_plain()
-    print_plain("=" * 60)
-    print_status(f"WPX Scan Results for: {target_url}")
-    print_plain("=" * 60)
-    print_plain()
-
-    # --- Headers ---
-    if finder.headers_result and finder.headers_result["entries"]:
-        hr = finder.headers_result
-        subitems = ["Interesting Entries:"]
-        for entry in hr["entries"]:
-            subitems.append(f" - {entry}")
-        subitems.append(f"Found By: {hr['found_by']}")
-        subitems.append(f"Confidence: {hr['confidence']}%")
-        print_finding("Headers", subitems)
-        print_plain()
-
-    # --- robots.txt ---
-    if "robots_txt" in finder.core_files:
-        rt = finder.core_files["robots_txt"]
-        subitems = []
-        if rt["entries"]:
-            subitems.append("Interesting Entries:")
-            for e in rt["entries"]:
-                subitems.append(f" - {e}")
-        subitems.append(f"Found By: {rt['found_by']}")
-        subitems.append(f"Confidence: {rt['confidence']}%")
-        print_finding(f"robots.txt found: {rt['url']}", subitems)
-        print_plain()
-
-    # --- XML-RPC ---
-    if "xmlrpc" in finder.core_files:
-        xi = finder.core_files["xmlrpc"]
-        subitems = [f"Found By: {xi['found_by']}", f"Confidence: {xi['confidence']}%", "References:"]
-        for ref in xi["references"]:
-            subitems.append(f" - {ref}")
-        print_finding(f"XML-RPC seems to be enabled: {xi['url']}", subitems)
-        print_plain()
-
-    # --- WP-Cron ---
-    if "wp_cron" in finder.core_files:
-        wc = finder.core_files["wp_cron"]
-        subitems = [f"Found By: {wc['found_by']}", f"Confidence: {wc['confidence']}%", "References:"]
-        for ref in wc["references"]:
-            subitems.append(f" - {ref}")
-        print_finding(f"The external WP-Cron seems to be enabled: {wc['url']}", subitems)
-        print_plain()
-
-    # --- Multisite ---
-    if finder.multisite:
-        ms = finder.multisite
-        subitems = [
-            f"Found By: {ms['found_by']}",
-            f"Confidence: {ms['confidence']}%",
-            f"Reference: {ms['reference']}",
-        ]
-        if ms.get("confirmed_by"):
-            cb = ms["confirmed_by"]
-            subitems.append(f"Confirmed By: {cb['found_by']}")
-            subitems.append(f" - {cb['url']}")
-        print_finding(f"This site appears to be a WordPress Multisite: {ms['url']}", subitems)
-        print_plain()
-
-    # --- WordPress readme.html ---
-    if "readme" in finder.core_files:
-        rd = finder.core_files["readme"]
-        print_finding(
-            f"WordPress readme found: {rd['url']}",
-            [f"Found By: {rd['found_by']}", f"Confidence: {rd['confidence']}%"],
-        )
-        print_plain()
-
-    # --- WP Version ---
-    if finder.wp_version:
-        wv = finder.wp_version
-        version = wv["version"]
-
-        if wv.get("is_latest") is True:
-            rd = wv.get("release_date")
-            rd_str = f", released on {rd}" if rd else ""
-            ver_label = f"{version} identified ({GREEN}Latest{rd_str}{RESET})"
-        elif wv.get("is_latest") is False:
-            latest = wv.get("latest_version", "?")
-            ver_label = (
-                f"{version} identified ({YELLOW}Outdated, latest: {latest}{RESET})"
-            )
-        else:
-            ver_label = f"{version} identified"
-
-        subitems = [
-            f"Found By: {wv['found_by']}",
-            f" - {wv['found_url']}, Match: '{wv['found_match']}'",
-        ]
-        if wv.get("confirmed_by"):
-            cb = wv["confirmed_by"]
-            subitems.append(f"Confirmed By: {cb['method']}")
-            match_str = f", Match: '{cb['match']}'" if cb.get("match") else ""
-            subitems.append(f" - {cb['url']}{match_str}")
-
-        print_finding(f"WordPress version {ver_label}", subitems)
-        print_plain()
-
-    # --- Theme ---
-    if finder.theme and isinstance(finder.theme, dict):
-        th = finder.theme
-        subitems = [f"Location: {th['location']}"]
-        if th.get("readme_url"):
-            subitems.append(f"Readme: {th['readme_url']}")
-        if th.get("style_url"):
-            subitems.append(f"Style URL: {th['style_url']}")
-        if th.get("name"):
-            subitems.append(f"Style Name: {th['name']}")
-        if th.get("description"):
-            subitems.append(f"Description: {th['description']}")
-        if th.get("author"):
-            subitems.append(f"Author: {th['author']}")
-        subitems.append(f"Found By: {th['found_by']}")
-        if th.get("confirmed_by"):
-            subitems.append(f"Confirmed By: {th['confirmed_by']}")
-        if th.get("version"):
-            ver = th.get("version")
-            conf = th.get("version_confidence", "?")
-            subitems.append(f"Version: {ver} ({conf}% confidence)")
-            subitems.append(f"Found By: {th['version_found_by']}")
-        print_finding(f"WordPress theme in use: {th['slug']}", subitems)
-        print_plain()
-
-    # --- Config Backups ---
-    if do_backups and finder.config_backups:
-        for bu in finder.config_backups:
-            print_finding(f"A Config Backup file has been found: {bu}")
-        print_plain()
-
-    # --- Plugins ---
-    if do_plugins and not finder.found_plugins:
-        print_info("No plugins detected.")
-    else:
-        for slug, info in finder.found_plugins.items():
-            ar = api_results.get(slug)
-            version = info.get("version", "Unknown")
-            version_confidence = info.get("version_confidence", 0)
-            version_found_by = info.get("version_found_by")
-            version_url = info.get("version_url")
-
-            subitems = [f"Location: {info.get('location', '')}"]
-
-            # Latest version from API
-            if ar and ar.get("latest_version"):
-                latest = ar["latest_version"]
-                if version != "Unknown" and version == latest:
-                    status_str = f"{GREEN}up to date{RESET}"
-                elif version != "Unknown":
-                    status_str = f"{YELLOW}outdated{RESET}"
-                else:
-                    status_str = ""
-                label = f"{latest} ({status_str})" if status_str else latest
-                subitems.append(f"Latest Version: {label}")
-            if ar and ar.get("last_updated"):
-                subitems.append(f"Last Updated: {ar['last_updated']}")
-
-            subitems.append(f"Found By: {info.get('found_by', 'Unknown')}")
-            if info.get("confirmed_by"):
-                subitems.append(f"Confirmed By: {info['confirmed_by']}")
-
-            if version != "Unknown" and version_confidence:
-                label = f"Version: {version} ({version_confidence}% confidence)"
-                subitems.append(label)
-                if version_found_by:
-                    subitems.append(f"Found By: {version_found_by}")
-                if version_url:
-                    subitems.append(f" - {version_url}")
-            elif version != "Unknown":
-                subitems.append(f"Version: {version}")
-
-            # Vulnerabilities
-            if ar and ar.get("vulns"):
-                all_vulns = ar["vulns"]
-                vulns = [v for v in all_vulns if _is_version_affected(version, v.get("fixed_in"))]
-                skipped = len(all_vulns) - len(vulns)
-                if vulns:
-                    title_str = f"{RED}[VULNERABLE]{RESET} {slug}"
-                    count_note = f"{len(vulns)} active vulnerability/ies found"
-                    if skipped:
-                        count_note += f" ({len(all_vulns)} total, {skipped} fixed in current version)"
-                    subitems.append(count_note + ":")
-                    for vuln in vulns:
-                        subitems.append(f" | Title: {vuln['title']}")
-                        subitems.append(f" | Fixed In: {vuln.get('fixed_in', 'N/A')}")
-                        refs = vuln.get("references", {}).get("url", [])
-                        if refs:
-                            subitems.append(f" | References: {refs[0]}")
-                    print_finding(title_str, subitems)
-                else:
-                    if skipped:
-                        subitems.append(f"No active vulnerabilities ({skipped} historical, all fixed)")
-                    print_finding(slug, subitems)
-            else:
-                print_finding(slug, subitems)
-            print_plain()
-
-    # --- Users ---
-    if finder.user_enum_ran:
-        found_users = finder.found_users
-        blocked = finder.user_enum_blocked
-        has_found = bool(found_users)
-        has_blocked = bool(blocked)
-
-        # Status
-        if has_found and has_blocked:
-            status = f"{YELLOW}Partially Protected{RESET}"
-        elif has_found:
-            status = f"{RED}Vulnerable{RESET}"
-        elif has_blocked:
-            status = f"{GREEN}Fully Protected{RESET}"
-        else:
-            status = "Unknown"
-
-        # Risk level — based on which methods leaked users
-        _high_risk = {"REST API User Enumeration", "Author Archive (?author=N)", "Passive HTML Scan"}
-        _med_risk = {"oEmbed Author Leak"}
-        if has_found:
-            leaked_via = {u["found_by"] for u in found_users}
-            if leaked_via & _high_risk:
-                risk = f"{RED}High{RESET}"
-            elif leaked_via & _med_risk:
-                risk = f"{YELLOW}Medium{RESET}"
-            else:
-                risk = f"{YELLOW}Low{RESET}"
-        else:
-            risk = f"{GREEN}None{RESET}"
-
-        subitems = [f"Status: {status}"]
-        if has_found:
-            subitems.append(f"{len(found_users)} user(s) found via leakage")
-        else:
-            subitems.append("No users found")
-
-        if has_found:
-            subitems.append("")
-            subitems.append("Users Discovered:")
-            for u in found_users:
-                label = u.get("login") or u.get("name") or "unknown"
-                uid_str = f" (ID: {u['id']})" if u.get("id") else ""
-                subitems.append(f"  \u2022 {label}{uid_str}")
-                subitems.append(f"    Found By: {u['found_by']}")
-                subitems.append(f"    Confidence: {u['confidence']}%")
-
-        if has_blocked:
-            subitems.append("")
-            subitems.append("Blocked Methods:")
-            for m in blocked:
-                subitems.append(f"  {GREEN}\u2713{RESET} {m:<42}(Good)")
-
-        subitems.append("")
-        subitems.append(f"Risk Level: {risk}")
-
-        # Contextual recommendation
-        if has_found:
-            leaked_via = {u["found_by"] for u in found_users}
-            recs = []
-            if "REST API User Enumeration" in leaked_via:
-                recs.append(
-                    "Restrict the /wp/v2/users REST API endpoint to authenticated users only."
-                )
-            if leaked_via & {"Author Archive (?author=N)", "Passive HTML Scan"}:
-                recs.append(
-                    "Block ?author= redirects and disable author archive pages via your security plugin."
-                )
-            if "RSS Feed Author Leak" in leaked_via:
-                recs.append(
-                    "Apply the `the_author` and `the_content_feed` filters to hide author info from feeds."
-                )
-            if "oEmbed Author Leak" in leaked_via:
-                recs.append("Restrict or disable the oEmbed endpoint.")
-            if recs:
-                subitems.append(f"Recommendation: {recs[0]}")
-                for r in recs[1:]:
-                    subitems.append(f"  {r}")
-
-        print_finding("User Enumeration", subitems)
-        print_plain()
-
-    # ------------------------------------------------------------------
-    # 6. Summary
+    # 5. Report (observation + enrichment, read back from the artifact we
+    #    just wrote — matches exactly what `wpx report <scan-dir>` would print)
     # ------------------------------------------------------------------
     elapsed = time.time() - start_time
     elapsed_str = str(timedelta(seconds=int(elapsed)))
-    print_plain("=" * 60)
+    print_report(target_url, inventory, vulnerability_report, meta=scan_meta, elapsed_str=elapsed_str)
     print_finding(f"Finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print_finding(f"Elapsed time: {elapsed_str}")
     print_plain()
 
 

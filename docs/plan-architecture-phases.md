@@ -133,7 +133,7 @@ wpx scan TARGET  =  collect + validate + save + enrich + report à la suite
   - Erreur WPScan (indisponible, quota) : n'efface jamais l'artefact existant, `enrich` reste
     rejouable plus tard (`{"status": "failed", "error": "..."}`, jamais une exception qui
     corrompt le scan).
-- [ ] **Étape 6 — `wpx report <scan-dir>`**
+- [x] **Étape 6 — `wpx report <scan-dir>`** — faite.
   - Nouveau `wpx_report.py`, lit `scan.json` (+ `vulnerability.json` si présent).
   - Distingue clairement **observation** (ce que la collecte a vu) et **enrichissement**
     (ce que WPScan indique) — jamais une vulnérabilité WPScan présentée comme preuve
