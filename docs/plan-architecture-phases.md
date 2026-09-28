@@ -121,7 +121,7 @@ wpx scan TARGET  =  collect + validate + save + enrich + report à la suite
   - `WPXFinder.to_inventory()` (ou fonction équivalente) qui sérialise l'état accumulé.
   - Artefact sur disque (structure à caler sur ce qui existe déjà si possible, sinon proposition
     `scans/<scan-id>/{scan.json,inventory.json,evidence.json,http/,screenshots/}`).
-- [ ] **Étape 4 — Séparer WPScan de la collecte**
+- [x] **Étape 4 — Séparer WPScan de la collecte** — faite.
   - Retirer l'appel `WPXVulnerability` de `_run()` / de la phase de collecte.
   - `--collect-only` (ou option équivalente) : ne construit jamais `WPXVulnerability`, ne
     consomme aucune requête WPScan, fonctionne sans clé / hors ligne / API indisponible.

@@ -76,6 +76,7 @@ def _show_help():
     print(f"    {GREEN}-o, --output FILE{RESET}       Save plain-text output to FILE")
     print(f"    {GREEN}--scan-dir DIR{RESET}          Save the collection artifact to DIR (default: scans/<id>/)")
     print(f"    {GREEN}--no-artifact{RESET}           Skip writing the collection artifact")
+    print(f"    {GREEN}--collect-only{RESET}          Never contact the WPScan API (ignores --api-key)")
     print()
     print(f"  {BOLD}Misc:{RESET}")
     print(f"    {GREEN}--update{RESET}                Force refresh of WPScan metadata files")
@@ -126,6 +127,9 @@ def main():
     parser.add_argument("--scan-dir", metavar="DIR",
                         help="Save the collection artifact (scan.json + inventory.json) to DIR "
                              "instead of an auto-generated scans/<timestamp>-<host>/ directory.")
+    parser.add_argument("--collect-only", action="store_true",
+                        help="Collection only: never contact the WPScan API, regardless of "
+                             "--api-key. Produces scan.json + inventory.json, enrich/report later.")
     parser.add_argument("--no-artifact", action="store_true",
                         help="Skip writing the collection artifact.")
     parser.add_argument("--help", "-h", action="store_true")
@@ -320,14 +324,24 @@ def _run(args):
         scan_dir = Path(args.scan_dir) if args.scan_dir else new_scan_dir(target_url)
         scan_path, inventory_path = save_scan_artifact(
             scan_dir, target_url, inventory,
-            meta={"enumerate": sorted(tokens), "threads": args.threads},
+            meta={
+                "enumerate": sorted(tokens),
+                "threads": args.threads,
+                "collect_only": args.collect_only,
+            },
         )
         print_status(f"Collection artifact saved: {scan_path.parent}/")
 
-    # 5. Vulnerability API
-    vuln_api = WPXVulnerability(api_key=args.api_key)
+    # 5. Vulnerability API — never reached in --collect-only: WPXVulnerability is not even
+    #    constructed, so no WPScan request can happen regardless of --api-key.
     api_results = {}
-    if args.api_key:
+    if args.collect_only:
+        if args.api_key:
+            print_warn("--collect-only: ignoring --api-key, no WPScan request will be made.")
+        else:
+            print_status("Collect-only mode: skipping WPScan enrichment.")
+    elif args.api_key:
+        vuln_api = WPXVulnerability(api_key=args.api_key)
         for slug in finder.found_plugins:
             api_results[slug] = vuln_api.get_vulnerabilities("plugins", slug)
 
