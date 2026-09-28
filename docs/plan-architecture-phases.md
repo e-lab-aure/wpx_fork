@@ -139,7 +139,10 @@ wpx scan TARGET  =  collect + validate + save + enrich + report à la suite
     (ce que WPScan indique) — jamais une vulnérabilité WPScan présentée comme preuve
     d'exploitation réussie.
   - Génère un rapport même sans WPScan (`WPScan enrichment: unavailable`).
-- [ ] **Étape 7 — Tests**
+- [x] **Étape 7 — Tests** — faite. Les 7 tests requis sont chacun explicitement présents dans
+  `tests/test_offline_guarantees.py` (un test par point, docstring citant l'exigence), en plus
+  de leur couverture croisée dans `test_collect_only.py`/`test_enricher.py`/
+  `test_inventory_artifact.py`/`test_core.py`.
   1. `collect-only` ne fait aucun appel WPScan.
   2. `enrich` ne fait aucune requête réseau vers la cible.
   3. L'enrichissement utilise uniquement l'inventaire sauvegardé.
@@ -147,9 +150,16 @@ wpx scan TARGET  =  collect + validate + save + enrich + report à la suite
   5. Une erreur WPScan ne détruit pas l'artefact de scan.
   6. Un scan existant peut être enrichi plusieurs fois.
   7. Le changement `networkidle → domcontentloaded` fonctionne (Étape 2).
-- [ ] **Étape 8 — README**
-  - Section Collection / Enrichment / Reporting / Offline replay.
-  - `wpx scan --collect-only TARGET`, `wpx enrich <scan-dir>`, `wpx report <scan-dir>`.
+
+  Bonus (bug trouvé en écrivant ces tests) : `wpx_output` garde `_quiet`/`_output_file` en
+  variables globales de module, réglées par `init_output()`. Les tests des sous-commandes CLI
+  (`_run_enrich`/`_run_report`) appellent `init_output(quiet=True)` en effet de bord, ce qui
+  fuitait sur les tests suivants dans le même process et supprimait silencieusement leur sortie
+  `print_info`/`print_status`. Corrigé par une fixture `autouse` dans `tests/conftest.py` qui
+  réinitialise cet état avant/après chaque test.
+- [x] **Étape 8 — README** — faite.
+  - Section « Collection, Enrichment & Reporting (offline replay) ».
+  - `wpx scan --collect-only URL`, `wpx enrich <scan-dir>`, `wpx report <scan-dir>`.
   - Rappel explicite : `enrich` ne rescanne jamais la cible, dépend des conditions/limites de
     l'API WPScan, ne doit jamais servir à contourner son quota ou ses CGU.
 
@@ -173,3 +183,75 @@ l'existant se présente en implémentant.
 - Pas de mécanisme pour contourner les limites/quotas/CGU de l'API WPScan.
 - Ne jamais transformer l'API WPScan en base de données locale de vulnérabilités.
 - Ne supprimer aucune fonctionnalité existante sans le dire explicitement ici.
+
+---
+
+## Bilan final (les 8 étapes sont terminées)
+
+### Fichiers modifiés/créés
+
+| Fichier | Statut | Rôle |
+|---|---|---|
+| `wpx_core.py` | Modifié | `networkidle` → `domcontentloaded`, timeout configurable, `_page_seems_usable()` |
+| `wpx_finder.py` | Modifié | `to_inventory()` (+ méthodes privées de sérialisation par section) |
+| `wpx_artifact.py` | **Créé** | Persistance `scan.json`/`inventory.json`/`vulnerability.json` |
+| `wpx_enricher.py` | **Créé** | `WPScanEnricher` — enrichissement offline, un seul module |
+| `wpx_report.py` | **Créé** | `print_report()` — rapport terminal, observation vs enrichissement |
+| `wpx.py` | Modifié | CLI (`--collect-only`, `--nav-timeout`, `--scan-dir`, `--no-artifact`), sous-commandes `enrich`/`report`, pipeline `_run()` réorganisé en étapes rejouables |
+| `wpx_vulnerability.py`, `wpx_data.py`, `wpx_output.py` | Inchangés | Déjà conformes (client API isolé, données WPScan, impression terminal réutilisable) |
+| `tests/test_core.py` | **Créé** | Étape 2 |
+| `tests/test_inventory_artifact.py` | **Créé** | Étape 3 |
+| `tests/test_collect_only.py` | **Créé** | Étapes 4, 5, 6 (CLI `enrich`/`report`) |
+| `tests/test_enricher.py` | **Créé** | Étape 5 |
+| `tests/test_report.py` | **Créé** | Étape 6 |
+| `tests/test_offline_guarantees.py` | **Créé** | Étape 7 — mapping direct des 7 tests requis |
+| `tests/conftest.py` | Modifié | Fixture `autouse` de reset de l'état global `wpx_output` |
+| `README.md` | Modifié | Section Collection/Enrichment/Reporting, tables d'options à jour |
+
+### Avant / après
+
+**Avant** : un seul flux `_run()` qui collecte, appelle WPScan (si `--api-key`) et imprime le
+tout dans le même bloc, sans artefact sur disque, sans étape rejouable.
+
+**Après** :
+```
+wpx scan --collect-only URL   →  scan.json + inventory.json (jamais d'appel WPScan)
+wpx enrich <scan-dir> --api-key KEY  →  vulnerability.json (jamais d'accès à la cible)
+wpx report <scan-dir>         →  rapport terminal (aucun accès réseau)
+wpx scan URL                  =  les trois étapes à la suite (comportement par défaut inchangé)
+```
+
+### Nouvelles commandes CLI
+
+- `wpx.py -u URL --collect-only [--scan-dir DIR] [--no-artifact]`
+- `wpx.py -u URL --nav-timeout MS`
+- `wpx.py enrich SCAN_DIR --api-key KEY`
+- `wpx.py report SCAN_DIR`
+
+### Tests
+
+- 137 tests passent (72 avant l'étape 2, 65 nouveaux répartis sur les étapes 2 à 7).
+- Vérifiés par des tests de bout en bout réels (serveur HTTP local, `--no-browser`) à chaque
+  étape : collecte seule, `enrich` isolé, `report` isolé, pipeline complet — dans un
+  environnement où le réseau vers WPScan est bloqué par le sandbox, confirmant que
+  l'indisponibilité de WPScan ne bloque jamais la collecte ni ne corrompt l'artefact.
+- Bug de fuite d'état entre tests trouvé et corrigé à l'étape 7 (voir ci-dessus).
+
+### Points restants ouverts
+
+- `docs/plan-architecture-phases.md` est forcé dans le suivi git malgré `*.md` dans
+  `.gitignore` (voir commit de l'étape 1) — décision à prendre : garder le forçage, exclure ce
+  fichier précisément du `.gitignore`, ou replier son contenu dans le README une fois la
+  fonctionnalité stabilisée.
+- L'inventaire normalisé ne budgétise pas encore la taille des preuves brutes pour
+  `--full-scan` (point d'attention identifié dès l'étape 1) — non bloquant aujourd'hui car
+  `to_inventory()` ne stocke que des chaînes courtes (slugs, URLs, extraits de match), mais à
+  surveiller si des preuves plus volumineuses sont ajoutées plus tard.
+- Pas de sous-commande `scan` explicite : le pipeline complet reste `wpx.py -u URL` (compatible
+  avec l'usage existant) plutôt que `wpx.py scan URL` comme esquissé dans le CLI visé
+  ci-dessus — changement mineur pour rester compatible avec la syntaxe déjà documentée/utilisée.
+
+### Installation / usage
+
+Aucun changement de dépendances ni d'installation. Les nouvelles commandes utilisent uniquement
+des modules déjà présents dans `requirements.txt`/`pyproject.toml`.

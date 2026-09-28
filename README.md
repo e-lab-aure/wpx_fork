@@ -25,6 +25,7 @@ WPX (WordPress X-Ray) is a security scanner that uses Camoufox to solve Cloudfla
 *   **User enumeration**: Discovers WordPress usernames via REST API, author archives, oEmbed, and RSS feed.
 *   **Multisite detection**: Identifies WordPress Multisite/Network installations.
 *   **WPScan API**: Integrates with the WPScan Vulnerability Database for vulnerability lookups.
+*   **Offline-replayable scans**: Collection never contacts the WPScan API. Save a scan artifact once, then enrich and report from it as many times as you like — fully offline with respect to the target.
 *   **Massive Plugin Catalog**: Tracks ~110,000 historical and ~55,000 current plugins.
 *   **Plugin cataloging**: Includes a script to fetch and rank plugin slugs from WordPress.org.
 *   **CLI output**: Structured terminal output similar to `wpscan`.
@@ -97,10 +98,11 @@ python3 wpx.py -u https://example.com --full-scan
 ```
 
 ### User enumeration
-User enumeration runs automatically. To limit the author ID probe range or disable it entirely:
+User enumeration runs automatically. To limit the author ID probe range, or disable it entirely
+by leaving `u` out of `-e/--enumerate` (default is all of `p,u,cb,t`):
 ```bash
 python3 wpx.py -u https://example.com --users-limit 20
-python3 wpx.py -u https://example.com --enum-users-disable
+python3 wpx.py -u https://example.com -e p,cb,t
 ```
 
 ### Silent output and logging
@@ -121,6 +123,78 @@ To change the limits:
 python3 data/wpx_fetch_plugins.py --active-limit 10000 --dead-limit 5000
 ```
 
+## Collection, Enrichment & Reporting (offline replay)
+
+WPX separates scanning into three independent steps: **collect** the target, **enrich** the
+findings against the WPScan Vulnerability Database, and **report** the result. Collection
+*never* calls the WPScan API — no key is required, none is contacted, and it works fully
+offline once the scan artifact is saved. Enrichment and reporting only ever read that saved
+artifact; neither one re-contacts the target.
+
+A default `wpx.py -u URL` run still does all three steps in sequence, exactly as before. The
+steps below just let you run them independently, or replay enrichment/reporting later without
+rescanning.
+
+### Collection artifact
+
+Every scan (unless `--no-artifact` is passed) writes a scan directory:
+
+```
+scans/<timestamp>-<host>/
+├── scan.json           # run metadata: target, timestamp, options used
+├── inventory.json       # normalized findings: WordPress/theme/plugin versions,
+│                         # each with a confidence score and its evidence — an
+│                         # unknown version is recorded as such, never guessed
+└── vulnerability.json   # WPScan enrichment result, written by `enrich` (absent
+                          # until enrichment has run at least once)
+```
+
+Choose where it's written with `--scan-dir DIR` (default: an auto-generated
+`scans/<timestamp>-<host>/`), or skip it with `--no-artifact`.
+
+### Collect only — never touch the WPScan API
+
+```bash
+python3 wpx.py -u https://example.com --collect-only
+```
+
+Builds `scan.json` + `inventory.json` and stops there. `WPXVulnerability`/`WPScanEnricher` is
+never even constructed in this mode — if `--api-key` is also passed by mistake, WPX warns and
+ignores it rather than making a request.
+
+### Enrich a saved scan — never touch the target
+
+```bash
+python3 wpx.py enrich scans/<scan-id>/ --api-key YOUR_API_KEY
+```
+
+Loads only `inventory.json`, queries WPScan once per distinct plugin slug already in it (never
+per detection source, never re-discovering anything), and writes `vulnerability.json`. A
+WPScan failure (bad key, quota, outage) is recorded in `vulnerability.json` as a failed status
+rather than raised — `scan.json`/`inventory.json` are never touched, and you can re-run
+`enrich` later once the issue is resolved. Running it again on the same scan directory simply
+overwrites `vulnerability.json` with a fresh result.
+
+**Note**: `enrich` still depends on the WPScan Vulnerability Database's own availability,
+rate limits, and terms of service. It never bypasses your API key's quota or caches WPScan
+vulnerability data as a substitute for a valid subscription — it only lets you decide *when*
+to spend a query against inventory you already collected.
+
+### Report a saved scan — no network access at all
+
+```bash
+python3 wpx.py report scans/<scan-id>/
+```
+
+Prints the same rich terminal report as a full scan, reading only `scan.json` + `inventory.json`
+(+ `vulnerability.json` if `enrich` has been run). Works with or without enrichment — a scan
+that was never enriched (or whose enrichment failed) still gets a complete report of what was
+*observed*; it's just missing the WPScan-known-vulnerabilities section. The report always
+separates the two explicitly: an **observation** is something collection actually saw on the
+target, with its own confidence and evidence, independent of WPScan; an **enrichment** is a
+known WPScan CVE for the plugin *slug* queried, which may or may not apply to the exact version
+observed — WPX never presents a WPScan hit as confirmed exploitation.
+
 ## Data management
 
 The `data/` directory contains the processed plugin datasets and maintenance tools:
@@ -139,18 +213,29 @@ The `data/` directory contains the processed plugin datasets and maintenance too
 | Flag | Description |
 |------|-------------|
 | `-u, --url` | Target WordPress URL (required). |
-| `--api-key` | WPScan Vulnerability Database API Key. |
+| `--api-key` | WPScan Vulnerability Database API Key. Ignored (with a warning) if `--collect-only` is also set. |
+| `-e, --enumerate OPTS` | Comma-separated scan selection: `p` (plugins), `u` (users), `cb` (config backups), `t` (theme). Default: all. |
 | `-t, --threads` | Concurrent threads for scanning (Default: 20). |
 | `--plugins-limit` | Limit the number of plugins to scan (e.g. 500, 5000). |
 | `--full-scan` | Scans all available plugin slugs (up to 50k+). |
 | `--update` | Force update of WPScan metadata files. |
 | `--no-browser` | Skip Camoufox WAF bypass and connect directly. |
-| `--enum-users-disable` | Skip user enumeration. |
 | `--users-limit N` | Number of author IDs to probe via ?author=N (default: 10). |
 | `--stealth [N]` | Add random delays between requests. Floor is 1s, ceiling is 2×N seconds (default when flag is set: 1.5 → 1–3s). Also caps threads to 3. |
 | `--idle-timeout N` | Abort if no server response received for N seconds (default: 60, 0 = disabled). |
+| `--nav-timeout MS` | Camoufox page navigation timeout in milliseconds (default: 60000). On timeout, WPX checks whether the page is usable anyway before giving up. |
 | `-q, --quiet` | Suppress banner, status, and progress — show findings only. |
 | `-o, --output FILE` | Write output to FILE (plain text, no ANSI codes). |
+| `--scan-dir DIR` | Save the collection artifact to DIR instead of an auto-generated `scans/<timestamp>-<host>/`. |
+| `--no-artifact` | Skip writing the collection artifact. |
+| `--collect-only` | Collection only — never contact the WPScan API, regardless of `--api-key`. See [Collection, Enrichment & Reporting](#collection-enrichment--reporting-offline-replay). |
+
+### Subcommands
+
+| Command | Description |
+|---------|-------------|
+| `wpx.py enrich SCAN_DIR --api-key KEY` | Offline WPScan enrichment of a prior scan. Reads only `SCAN_DIR/inventory.json`, never contacts the target. Writes `vulnerability.json`. |
+| `wpx.py report SCAN_DIR` | Print a report from a saved scan — with enrichment if `vulnerability.json` exists, without it otherwise. No network access at all. |
 
 ### Plugin Fetcher (`data/wpx_fetch_plugins.py`)
 
