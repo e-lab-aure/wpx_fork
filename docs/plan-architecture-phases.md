@@ -115,7 +115,7 @@ wpx scan TARGET  =  collect + validate + save + enrich + report à la suite
     est malgré tout exploitable (URL courante, contenu, indicateurs WAF/challenge, DOM
     disponible) avant de déclarer l'échec définitif.
   - Test de régression si l'architecture de test le permet (mock de `page.goto`).
-- [ ] **Étape 3 — Inventaire normalisé + artefact de collecte**
+- [x] **Étape 3 — Inventaire normalisé + artefact de collecte** — faite.
   - Modèle interne (`wordpress`, `plugins[]`, `themes[]`, chacun avec `confidence`, `evidence`) —
     valeurs uniquement issues des résultats réels, jamais inventées.
   - `WPXFinder.to_inventory()` (ou fonction équivalente) qui sérialise l'état accumulé.
