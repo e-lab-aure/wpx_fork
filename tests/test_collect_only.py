@@ -61,43 +61,44 @@ def stub_collection(mocker):
     return dummy_core, dummy_data
 
 
-def test_collect_only_never_constructs_wpxvulnerability_even_with_api_key(mocker):
-    vuln_spy = mocker.patch("wpx.WPXVulnerability")
+def test_collect_only_never_constructs_enricher_even_with_api_key(mocker):
+    enricher_spy = mocker.patch("wpx.WPScanEnricher")
     args = _make_args(collect_only=True, api_key="fake-api-key")
 
     wpx._run(args)
 
-    vuln_spy.assert_not_called()
+    enricher_spy.assert_not_called()
 
 
 def test_collect_only_without_api_key_also_skips_wpscan(mocker):
-    vuln_spy = mocker.patch("wpx.WPXVulnerability")
+    enricher_spy = mocker.patch("wpx.WPScanEnricher")
     args = _make_args(collect_only=True, api_key=None)
 
     wpx._run(args)
 
-    vuln_spy.assert_not_called()
+    enricher_spy.assert_not_called()
 
 
 def test_non_collect_only_with_api_key_still_calls_wpscan(mocker):
-    vuln_instance = mocker.MagicMock()
-    vuln_instance.get_vulnerabilities.return_value = None
-    vuln_spy = mocker.patch("wpx.WPXVulnerability", return_value=vuln_instance)
+    enricher_instance = mocker.MagicMock()
+    enricher_instance.enrich_inventory.return_value = {"status": "ok", "plugins": {}}
+    enricher_spy = mocker.patch("wpx.WPScanEnricher", return_value=enricher_instance)
     args = _make_args(collect_only=False, api_key="fake-api-key")
 
     wpx._run(args)
 
-    vuln_spy.assert_called_once_with(api_key="fake-api-key")
+    enricher_spy.assert_called_once_with(api_key="fake-api-key")
+    enricher_instance.enrich_inventory.assert_called_once()
 
 
 def test_non_collect_only_without_api_key_skips_wpscan_as_before(mocker):
-    # Pre-existing behavior, unchanged: no key means no WPXVulnerability construction either.
-    vuln_spy = mocker.patch("wpx.WPXVulnerability")
+    # Pre-existing behavior, unchanged: no key means no WPScanEnricher construction either.
+    enricher_spy = mocker.patch("wpx.WPScanEnricher")
     args = _make_args(collect_only=False, api_key=None)
 
     wpx._run(args)
 
-    vuln_spy.assert_not_called()
+    enricher_spy.assert_not_called()
 
 
 def test_collect_only_saves_artifact_with_collect_only_flag_in_meta(mocker):
@@ -162,3 +163,59 @@ def test_run_enrich_exits_nonzero_on_failed_status(mocker, tmp_path):
     with pytest.raises(SystemExit) as exc_info:
         wpx._run_enrich([str(tmp_path), "--api-key", "fake-key", "-q"])
     assert exc_info.value.code == 1
+
+
+# ------------------------------------------------------------------
+# `wpx.py report <scan-dir>` — offline report subcommand
+# ------------------------------------------------------------------
+
+def test_run_report_loads_all_three_files_and_prints(mocker, tmp_path, capsys):
+    mocker.patch("wpx.load_scan_meta", return_value={"target": "https://example.com"})
+    mocker.patch("wpx.load_inventory", return_value={
+        "target": "https://example.com", "wordpress": None, "theme": None, "plugins": [],
+        "users": {"found": [], "ran": False, "blocked_techniques": []},
+        "multisite": None, "core_files": {}, "headers": None, "config_backups": [],
+    })
+    mocker.patch("wpx.load_vulnerability_report", return_value=None)
+
+    wpx._run_report([str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert "https://example.com" in out
+
+
+def test_run_report_never_touches_network(mocker, tmp_path):
+    # No WPXCore, no WPScanEnricher — report is a pure read of local files.
+    mocker.patch("wpx.load_scan_meta", return_value={"target": "https://example.com"})
+    mocker.patch("wpx.load_inventory", return_value={
+        "target": "https://example.com", "wordpress": None, "theme": None, "plugins": [],
+        "users": {"found": [], "ran": False, "blocked_techniques": []},
+        "multisite": None, "core_files": {}, "headers": None, "config_backups": [],
+    })
+    mocker.patch("wpx.load_vulnerability_report", return_value=None)
+    core_spy = mocker.patch("wpx.WPXCore")
+    enricher_spy = mocker.patch("wpx.WPScanEnricher")
+
+    wpx._run_report([str(tmp_path)])
+
+    core_spy.assert_not_called()
+    enricher_spy.assert_not_called()
+
+
+def test_run_report_uses_vulnerability_report_when_present(mocker, tmp_path, capsys):
+    mocker.patch("wpx.load_scan_meta", return_value={"target": "https://example.com"})
+    mocker.patch("wpx.load_inventory", return_value={
+        "target": "https://example.com", "wordpress": None, "theme": None,
+        "plugins": [{"slug": "elementor", "status": "passive", "location": "", "version": None,
+                     "version_confidence": 0, "evidence": []}],
+        "users": {"found": [], "ran": False, "blocked_techniques": []},
+        "multisite": None, "core_files": {}, "headers": None, "config_backups": [],
+    })
+    mocker.patch("wpx.load_vulnerability_report", return_value={
+        "status": "ok", "queried_at": "x", "plugins": {"elementor": {"vulns": []}},
+    })
+
+    wpx._run_report([str(tmp_path)])
+
+    out = capsys.readouterr().out
+    assert "elementor" in out
